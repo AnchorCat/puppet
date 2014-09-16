@@ -774,4 +774,244 @@ describe Puppet::Resource::Type do
       dest.code.children.collect { |l| l.value }.should == %w{dest source}
     end
   end
+
+  describe "with code associated with one or more files" do
+    def code(str)
+      Puppet::Parser::AST::Leaf.new :value => str
+    end
+
+    before :each do
+      dcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("dest")])
+      @klass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "dest", :code => dcode, :file => "/dest")
+      scode = Puppet::Parser::AST::BlockExpression.new(:children => [code("source")])
+      source = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "source", :code => scode, :file => "/source")
+      @klass.merge(source)
+    end
+
+    it "should contain merged code from all files" do
+      @klass.code.children.collect { |l| l.value }.should == %w{dest source}
+    end
+
+    it "should contain concatenated docs from all files" do
+      @klass.doc.should == "destsource"
+    end
+
+    describe "when expiring original file" do
+      before :each do
+        @klass.expire_file("/dest")
+        @klass.refresh_code
+      end
+
+      it "should remove code from expired file" do
+        @klass.code.children.collect { |l| l.value }.should == %w{source}
+      end
+
+      it "should remove docs from expired file" do
+        @klass.doc.should == "source"
+      end
+
+      describe "after re-merging original file" do
+        before :each do
+          newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+          newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/dest")
+          @klass.merge(newclass)
+        end
+
+        it "contains re-merged code" do
+          @klass.code.children.collect { |l| l.value }.should == %w{source new}
+        end
+
+        it "contains re-merged docs" do
+          @klass.doc.should == "sourcenew"
+        end
+      end
+    end
+
+    describe "when expiring merged file" do
+      before :each do
+        @klass.expire_file("/source")
+        @klass.refresh_code
+      end
+
+      it "should remove code from expired merged file" do
+        @klass.code.children.collect { |l| l.value }.should == %w{dest}
+      end
+
+      it "should remove docs from expired merged file" do
+        @klass.doc.should == "dest"
+      end
+
+      describe "after re-merging file" do
+        before :each do
+          newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+          newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/source")
+          @klass.merge(newclass)
+        end
+
+        it "contains re-merged code" do
+          @klass.code.children.collect { |l| l.value }.should == %w{dest new}
+        end
+
+        it "contains re-merged docs" do
+          @klass.doc.should == "destnew"
+        end
+      end
+    end
+
+    describe "and code with no associated file" do
+      before :each do
+        morecode = Puppet::Parser::AST::BlockExpression.new(:children => [code("more")])
+        moreclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "more", :code => morecode)
+        @klass.merge(moreclass)
+      end
+
+      it "should contain merged code from all files" do
+        @klass.code.children.collect { |l| l.value }.should == %w{dest source more}
+      end
+
+      it "should contain concatenated docs from all files" do
+        @klass.doc.should == "destsourcemore"
+      end
+
+      describe "when expiring original file" do
+        before :each do
+          @klass.expire_file("/dest")
+          @klass.refresh_code
+        end
+
+        it "should remove code from expired file" do
+          @klass.code.children.collect { |l| l.value }.sort.should == %w{more source}
+        end
+
+        it "should remove docs from expired file" do
+          @klass.doc.should match /^(sourcemore|moresource)$/
+        end
+
+        describe "after re-merging original file" do
+          before :each do
+            newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+            newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/dest")
+            @klass.merge(newclass)
+          end
+
+          it "contains re-merged code" do
+            @klass.code.children.collect { |l| l.value }.sort.should == %w{more new source}
+          end
+
+          it "contains re-merged docs" do
+            @klass.doc.should match /^(sourcemore|moresource)new$/
+          end
+        end
+      end
+
+      describe "when expiring merged file" do
+        before :each do
+          @klass.expire_file("/source")
+          @klass.refresh_code
+        end
+
+        it "should remove code from expired merged file" do
+          @klass.code.children.collect { |l| l.value }.sort.should == %w{dest more}
+        end
+
+        it "should remove docs from expired merged file" do
+          @klass.doc.should match /^(destmore|moredest)$/
+        end
+
+        describe "after re-merging file" do
+          before :each do
+            newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+            newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/source")
+            @klass.merge(newclass)
+          end
+
+          it "contains re-merged code" do
+            @klass.code.children.collect { |l| l.value }.sort.should == %w{dest more new}
+          end
+
+          it "contains re-merged docs" do
+            @klass.doc.should match /^(destmore|moredest)new$/
+          end
+        end
+      end
+    end
+
+    describe "and additional code with the same file" do
+      before :each do
+        morecode = Puppet::Parser::AST::BlockExpression.new(:children => [code("more")])
+        moreclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "more", :code => morecode, :file => "/dest")
+        @klass.merge(moreclass)
+      end
+
+      it "should contain merged code from all files" do
+        @klass.code.children.collect { |l| l.value }.should == %w{dest source more}
+      end
+
+      it "should contain concatenated docs from all files" do
+        @klass.doc.should == "destsourcemore"
+      end
+
+      describe "when expiring original file" do
+        before :each do
+          @klass.expire_file("/dest")
+          @klass.refresh_code
+        end
+
+        it "should remove code from expired file" do
+          @klass.code.children.collect { |l| l.value }.should == %w{source}
+        end
+
+        it "should remove docs from expired file" do
+          @klass.doc.should == "source"
+        end
+
+        describe "after re-merging original file" do
+          before :each do
+            newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+            newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/dest")
+            @klass.merge(newclass)
+          end
+
+          it "contains re-merged code" do
+            @klass.code.children.collect { |l| l.value }.should == %w{source new}
+          end
+
+          it "contains re-merged docs" do
+            @klass.doc.should == "sourcenew"
+          end
+        end
+      end
+
+      describe "when expiring merged file" do
+        before :each do
+          @klass.expire_file("/source")
+          @klass.refresh_code
+        end
+
+        it "should remove code from expired merged file" do
+          @klass.code.children.collect { |l| l.value }.should == %w{dest more}
+        end
+
+        it "should remove docs from expired merged file" do
+          @klass.doc.should == "destmore"
+        end
+
+        describe "after re-merging file" do
+          before :each do
+            newcode = Puppet::Parser::AST::BlockExpression.new(:children => [code("new")])
+            newclass = Puppet::Resource::Type.new(:hostclass, "foo", :doc => "new", :code => newcode, :file => "/source")
+            @klass.merge(newclass)
+          end
+
+          it "contains re-merged code" do
+            @klass.code.children.collect { |l| l.value }.should == %w{dest more new}
+          end
+
+          it "contains re-merged docs" do
+            @klass.doc.should == "destmorenew"
+          end
+        end
+      end
+    end
+  end
 end

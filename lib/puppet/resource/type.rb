@@ -73,6 +73,10 @@ class Puppet::Resource::Type
     self.from_data_hash(data)
   end
 
+  def file_code
+    @file_code ||= Hash.new{|h,k| h[k] = []}
+  end
+
   def to_data_hash
     data = [:doc, :line, :file, :parent].inject({}) do |hash, param|
       next hash unless (value = self.send(param)) and (value != "")
@@ -150,6 +154,8 @@ class Puppet::Resource::Type
     @match = nil
 
     @module_name = options[:module_name]
+
+    file_code[file] << self.dup
   end
 
   # This is only used for node names, and really only when the node name
@@ -181,6 +187,8 @@ class Puppet::Resource::Type
     # This might just be an empty, stub class.
     return unless other.code
 
+    file_code[other.file] << other.dup
+
     unless self.code
       self.code = other.code
       return
@@ -188,6 +196,23 @@ class Puppet::Resource::Type
 
     self.code = Puppet::Parser::ParserFactory.code_merger.concatenate([self, other])
 #    self.code = self.code.sequence_with(other.code)
+  end
+
+  def expire_file(file)
+    @code_changed = true
+    file_code.delete(file)
+  end
+
+  # This is a costly operation -- re-merging all code from scratch
+  # takes a while. This method must be called after one or more
+  # invocations of expire_file, before trying to use the type, in order
+  # for file expiration to take effect.
+  def refresh_code
+    return unless @code_changed
+    new_code = file_code.values.flatten
+    self.code = Puppet::Parser::ParserFactory.code_merger.concatenate(new_code)
+    self.doc = new_code.map{|c| c.doc}.join("")
+    @code_changed = false
   end
 
   # Make an instance of the resource type, and place it in the catalog
