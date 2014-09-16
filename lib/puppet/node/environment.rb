@@ -459,6 +459,124 @@ class Puppet::Node::Environment
     end
   end
 
+  def inotify_notifier
+    require 'rb-inotify'
+    @inotify_notifier ||= INotify::Notifier.new
+  end
+  private :inotify_notifier
+
+  def inotify_callbacks
+    @inotify_callbacks ||= {}
+  end
+  private :inotify_callbacks
+
+  def inotify_to_expire
+    @inotify_to_expire ||= {}
+  end
+  private :inotify_to_expire
+
+  def inotify_watch(file, modname = '', reparse = false, &block)
+    return unless self[:inotify_reload]
+
+    Puppet.debug "inotify_watch: Adding a watch to #{file.inspect}"
+    inotify_notifier.watch(file, :modify) do |event|
+      inotify_handle(event, modname, reparse)
+    end
+    inotify_callbacks[file] = block
+
+    parent = File.expand_path(File.join(file, ".."))
+    Puppet.debug "inotify_watch: Adding a watch to #{parent.inspect}"
+    inotify_notifier.watch(parent,
+      :create,
+      :delete,
+      :delete_self,
+      :move_self,
+      :moved_from,
+      :moved_to) \
+    do |event|
+      inotify_handle(event, modname, reparse)
+    end
+  end
+
+  def inotify_handle(event, modname, reparse)
+    Puppet.debug "inotify_handle: Processing event#{event.name.nil? ? "" : " #{event.name.inspect}"} for #{event.watcher.path.inspect} with flags #{event.flags.inspect}"
+
+    if event.flags.include?(:delete_self) \
+    or event.flags.include?(:move_self) \
+    or event.flags.include?(:unmount)
+      # There are diminishing returns trying to gracefully handle
+      # increasingly rare and complex manoeuvres. Just drop all known
+      # types and reparse everything if this happens.
+      inotify_clear
+    elsif event.absolute_name =~ /\.pp$/
+      Puppet.debug "inotify_handle: Scheduling file #{event.absolute_name.inspect} for expiration"
+      inotify_to_expire[event.absolute_name] = [modname, reparse]
+    end
+  end
+  private :inotify_handle
+
+  def inotify_process
+    return unless self[:inotify_reload]
+    Puppet.debug "inotify_process: Processing inotify events"
+
+    # We use while and not if here to work around a (probable) bug in
+    # rb-inotify. See <https://github.com/nex3/rb-inotify/issues/39>.
+    while IO.select([inotify_notifier.to_io], [], [], 0)
+      inotify_notifier.process
+    end
+
+    return if @known_resource_types.nil? or inotify_to_expire.empty?
+    Puppet.debug "inotify_process: Expiring files"
+
+    inotify_to_expire.each_pair do |file, args|
+      inotify_expire(file)
+      # Don't delete this entry if we need to reparse it below.
+      inotify_to_expire.delete(file) unless args[1]
+    end
+    Puppet.debug "inotify_process: Refreshing parsed code"
+    @known_resource_types.refresh_code
+
+    inotify_to_expire.each_pair do |file, args|
+      inotify_reparse(file, *args)
+      inotify_to_expire.delete(file)
+    end
+  rescue INotify::QueueOverflowError
+    # If the inotify queue overflowed, there's no way to reconstruct
+    # our state from inotify events, so just discard and re-read
+    # everything.
+    Puppet.debug "inotify_process: inotify queue overflowed"
+    inotify_clear
+  end
+
+  def inotify_expire(file)
+    Puppet.debug "inotify_expire: Expiring file #{file.inspect}"
+    @known_resource_types.expire_file(file)
+    if block = inotify_callbacks[file]
+      Puppet.debug "inotify_expire: Calling block for file #{file.inspect}"
+      block.call
+    end
+  end
+  private :inotify_expire
+
+  def inotify_reparse(file, modname, reparse)
+    if reparse and File.exists?(file)
+      Puppet.debug "inotify_reparse: Reparsing file #{file.inspect}"
+      parser = Puppet::Parser::ParserFactory.parser(self)
+      parser.file = file
+      inotify_watch(file, modname, reparse, &inotify_callbacks[file])
+      @known_resource_types.import_ast(parser.parse, modname)
+    end
+  end
+  private :inotify_reparse
+
+  def inotify_clear
+    Puppet.debug "inotify_clear: Clearing all parsed code"
+    @known_resource_types = nil
+    inotify_callbacks.clear
+    inotify_to_expire.clear
+  end
+  private :inotify_clear
+
   # @return [String] The stringified value of the `name` instance variable
   # @api public
   def to_s
@@ -553,18 +671,20 @@ class Puppet::Node::Environment
         if Puppet[:parser] == 'future'
           parse_results = Puppet::FileSystem::PathPattern.absolute(File.join(file, '**/*.pp')).glob.sort.map do | file_to_parse |
             parser.file = file_to_parse
+            inotify_watch(file_to_parse, '', true)
             parser.parse
           end
         else
           parse_results = Dir.entries(file).find_all { |f| f =~ /\.pp$/ }.sort.map do |file_to_parse|
-            parser.file = File.join(file, file_to_parse)
+            file_to_parse = File.join(file, file_to_parse)
+            parser.file = file_to_parse
+            inotify_watch(file_to_parse, '', true)
             parser.parse
           end
         end
-        # Use a parser type specific merger to concatenate the results
-        Puppet::Parser::AST::Hostclass.new('', :code => Puppet::Parser::ParserFactory.code_merger.concatenate(parse_results))
       else
         parser.file = file
+        inotify_watch(file, '', true)
         parser.parse
       end
     end

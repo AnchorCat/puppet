@@ -459,6 +459,11 @@ module Puppet
       This setting can also be set to `unlimited`, which causes the environment to
       be cached until the master is restarted."
     },
+    :inotify_reload => {
+      :default    => false,
+      :type       => :boolean,
+      :desc       => "Whether to use the Linux kernel inotify subsystem to auto-reload manifests when they change. Requires Linux kernel 2.6.21 or newer.",
+    },
     :queue_type => {
       :default    => "stomp",
       :desc       => "Which type of queue to use for asynchronous processing.",

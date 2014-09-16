@@ -569,6 +569,228 @@ describe Puppet::Node::Environment do
     it_behaves_like 'the environment'
   end
 
+  describe 'with classic parser and inotify_reload enabled' do
+    before :each do
+      Puppet[:parser] = 'current'
+      Puppet[:inotify_reload] = true
+
+      require 'rb-inotify'
+      INotify::Notifier.any_instance.stubs(:watch)
+    end
+    it_behaves_like 'the environment'
+
+    before :each do
+      class Puppet::Node::Environment
+        # This is private in a running Puppet process, but we call it
+        # directly in the test suite to simulate inotify events.
+        public :inotify_handle
+
+        # #known_resource_types will initialise @known_resource_types
+        # if it is nil. Since we want to *test* for
+        # @known_resource_types being nil, we provide a method to get
+        # at the raw instance variable here.
+        def raw_known_resource_types
+          @known_resource_types
+        end
+      end
+
+      class MockInotifyWatcher
+        attr_reader :path
+
+        def initialize(opts = {})
+          @path = opts[:path]
+        end
+      end
+
+      class MockInotifyEvent
+        attr_reader :watcher, :flags
+
+        def initialize(opts = {})
+          @myname = opts[:name]
+          @flags = opts[:flags]
+          @watcher = MockInotifyWatcher.new(:path => opts[:path])
+        end
+
+        def name
+          @myname || ""
+        end
+
+        def absolute_name
+          return watcher.path if name.empty?
+          return File.join(watcher.path, name)
+        end
+      end
+
+      class MockCallback
+        def callback; end
+      end
+
+      def mock_inotify_event(path, opts = {}, &block)
+        modname = opts[:modname] || ""
+        reparse = !!opts[:reparse]
+        @env.inotify_watch(path, modname, reparse, &block)
+
+        if opts[:parent]
+          notify_path = File.dirname(path)
+          notify_name = File.basename(path)
+        else
+          notify_path = path
+          notify_name = ""
+        end
+
+        event = MockInotifyEvent.new(:path => notify_path, :name => notify_name, :flags => opts[:flags])
+        @env.inotify_handle(event, modname, reparse)
+        @env.inotify_process
+      end
+
+      @env = Puppet::Node::Environment.new
+      @env.known_resource_types
+    end
+
+    context "when a watched manifest is modified" do
+      it "calls @known_resource_types.expire_file" do
+        @env.known_resource_types.expects(:expire_file).once.with("/foo.pp").returns(nil)
+        mock_inotify_event("/foo.pp", :flags => [:modify])
+      end
+
+      it "calls a block for the watched manifest, if given" do
+        cb = MockCallback.new
+        cb.expects(:callback).once
+        mock_inotify_event("/foo.pp", :flags => [:modify]) { cb.callback }
+      end
+
+      it "does not reparse the file when reparse = false" do
+        File.stubs(:exists?).with("/foo.pp").returns(true)
+        @env.known_resource_types.expects(:import_ast).never
+        mock_inotify_event("/foo.pp", :flags => [:modify], :reparse => false)
+      end
+
+      it "reparses the file when reparse = true" do
+        File.stubs(:exists?).with("/foo.pp").returns(true)
+        @env.known_resource_types.expects(:import_ast).once
+        mock_inotify_event("/foo.pp", :flags => [:modify], :reparse => true)
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:modify])
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+
+    context "when a watched manifest is deleted" do
+      it "calls @known_resource_types.expire_file" do
+        @env.known_resource_types.expects(:expire_file).once.with("/foo.pp").returns(nil)
+        mock_inotify_event("/foo.pp", :flags => [:delete], :parent => true)
+      end
+
+      it "calls a block for the watched manifest, if given" do
+        cb = MockCallback.new
+        cb.expects(:callback).once
+        mock_inotify_event("/foo.pp", :flags => [:delete], :parent => true) { cb.callback }
+      end
+
+      it "does not attempt to rewatch a non-existent file when reparse = true" do
+        File.stubs(:exists?).with("/foo.pp").returns(false)
+        @env.expects(:inotify_watch).once
+        mock_inotify_event("/foo.pp", :flags => [:delete], :parent => true, :reparse => true)
+      end
+
+      it "does not attempt to reparse a non-existent file when reparse = true" do
+        File.stubs(:exists?).with("/foo.pp").returns(false)
+        @env.known_resource_types.expects(:import_ast).never
+        mock_inotify_event("/foo.pp", :flags => [:delete], :parent => true, :reparse => true)
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:delete], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+
+    context "when a watched manifest is recreated" do
+      it "calls @known_resource_types.expire_file" do
+        @env.known_resource_types.expects(:expire_file).once.with("/foo.pp").returns(nil)
+        mock_inotify_event("/foo.pp", :flags => [:create], :parent => true)
+      end
+
+      it "calls a block for the watched manifest, if given" do
+        cb = MockCallback.new
+        cb.expects(:callback).once
+        mock_inotify_event("/foo.pp", :flags => [:create], :parent => true) { cb.callback }
+      end
+
+      it "rewatches the file when reparse = true" do
+        File.stubs(:exists?).with("/foo.pp").returns(true)
+        @env.expects(:inotify_watch).twice
+        mock_inotify_event("/foo.pp", :flags => [:create], :parent => true, :reparse => true)
+      end
+
+      it "reparses the file when reparse = true" do
+        File.stubs(:exists?).with("/foo.pp").returns(true)
+        @env.known_resource_types.expects(:import_ast).once
+        mock_inotify_event("/foo.pp", :flags => [:create], :parent => true, :reparse => true)
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:create], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+
+    context "when a watched manifest's parent directory is deleted" do
+      it "discards all known resource types" do
+        mock_inotify_event("/foo.pp", :flags => [:delete_self], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:delete_self], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+
+    context "when a watched manifest's parent directory is moved" do
+      it "discards all known resource types" do
+        mock_inotify_event("/foo.pp", :flags => [:move_self], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:move_self], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+
+    context "when a watched manifest's filesystem is unmounted" do
+      it "discards all known resource types" do
+        mock_inotify_event("/foo.pp", :flags => [:unmount])
+        @env.raw_known_resource_types.should be_nil
+      end
+
+      it "discards all known resource types for events on the parent directory" do
+        mock_inotify_event("/foo.pp", :flags => [:unmount], :parent => true)
+        @env.raw_known_resource_types.should be_nil
+      end
+
+      it "discards known resource types if the event queue overflows" do
+        IO.stubs(:select).returns(true)
+        INotify::Notifier.any_instance.stubs(:process).raises(INotify::QueueOverflowError)
+        mock_inotify_event("/foo.pp", :flags => [:unmount])
+        @env.raw_known_resource_types.should be_nil
+      end
+    end
+  end
+
   describe '#current' do
     it 'should return the current context' do
       env = Puppet::Node::Environment.new(:test)

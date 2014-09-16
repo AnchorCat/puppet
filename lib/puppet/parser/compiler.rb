@@ -19,6 +19,7 @@ class Puppet::Parser::Compiler
   def self.compile(node)
     $env_module_directories = nil
     node.environment.check_for_reparse
+    node.environment.inotify_process
 
     if node.environment.conflicting_manifest_settings?
       errmsg = [

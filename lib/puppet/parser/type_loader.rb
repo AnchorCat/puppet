@@ -95,14 +95,14 @@ class Puppet::Parser::TypeLoader
       raise_no_files_found(pattern)
     end
 
-    load_files(modname, files)
+    load_files(modname, files, false)
   end
 
   def raise_no_files_found(pattern)
     raise Puppet::ImportError, "No file(s) found for import of '#{pattern}'"
   end
 
-  def load_files(modname, files)
+  def load_files(modname, files, reparse = true)
     @loaded ||= {}
     loaded_asts = []
     files.reject { |file| @loaded[file] }.each do |file|
@@ -127,6 +127,10 @@ class Puppet::Parser::TypeLoader
       end
 
       @loaded[file] = true
+
+      environment.inotify_watch(file, modname, reparse) do
+        @loaded[file] = false unless reparse
+      end
     end
 
     loaded_asts.collect do |ast|
