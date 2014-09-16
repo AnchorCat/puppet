@@ -18,6 +18,10 @@ class Puppet::Util::FileWatcher
     @files[filename] = Puppet::Util::WatchedFile.new(filename)
   end
 
+  def unwatch(filename)
+    @files.delete(filename)
+  end
+
   def watching?(filename)
     @files.has_key?(filename)
   end

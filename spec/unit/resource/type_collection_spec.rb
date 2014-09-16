@@ -415,4 +415,676 @@ describe Puppet::Resource::TypeCollection do
       end
     end
   end
+
+  describe "when expiring files" do
+    before :each do
+      node1 = Puppet::Resource::Type.new(:node, "foo", :file => "/foo")
+      node2 = Puppet::Resource::Type.new(:node, "bar", :file => "/bar")
+      class1 = Puppet::Resource::Type.new(:hostclass, "myclass", :file => "/myclass")
+      class2 = Puppet::Resource::Type.new(:hostclass, "otherclass", :file => "/otherclass")
+      define1 = Puppet::Resource::Type.new(:definition, "something", :file => "/something")
+      define2 = Puppet::Resource::Type.new(:definition, "otherthing", :file => "/otherthing")
+
+      code1 = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "foo")])
+      mainclass1 = Puppet::Resource::Type.new(:hostclass, "", :code => code1, :file => "/foo")
+      code2 = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "bar")])
+      mainclass2 = Puppet::Resource::Type.new(:hostclass, "", :code => code2, :file => "/bar")
+
+      @loader = Puppet::Resource::TypeCollection.new(environment)
+      [node1, node2, class1, class2, define1, define2, mainclass1, mainclass2].each do |thing|
+        @loader.add(thing)
+      end
+    end
+
+    it "should contain all of the code" do
+      @loader.node("foo").should_not be_nil
+      @loader.node("bar").should_not be_nil
+      @loader.hostclass("myclass").should_not be_nil
+      @loader.hostclass("otherclass").should_not be_nil
+      @loader.definition("something").should_not be_nil
+      @loader.definition("otherthing").should_not be_nil
+
+      mainclass = @loader.hostclass("")
+      mainclass.should_not be_nil
+      mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+      children = mainclass.code.children
+      children.length.should == 2
+      [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+      children[0].value.should == "foo"
+      children[1].value.should == "bar"
+    end
+
+    context "when expiring the first mainclass manifest" do
+      before :each do
+        @loader.expire_file("/foo")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.node("foo").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("bar").should_not be_nil
+        @loader.hostclass("myclass").should_not be_nil
+        @loader.hostclass("otherclass").should_not be_nil
+        @loader.definition("something").should_not be_nil
+        @loader.definition("otherthing").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 1
+        children[0].should be_a Puppet::Parser::AST::Leaf
+        children[0].value.should == "bar"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          node = Puppet::Resource::Type.new(:node, "foo", :file => "/foo")
+          @loader.add(node)
+
+          code = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "foo")])
+          mainclass = Puppet::Resource::Type.new(:hostclass, "", :code => code, :file => "/foo")
+          @loader.add(mainclass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "bar"
+          children[1].value.should == "foo"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          node = Puppet::Resource::Type.new(:node, "new", :file => "/foo")
+          @loader.add(node)
+
+          code = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "changed")])
+          mainclass = Puppet::Resource::Type.new(:hostclass, "", :code => code, :file => "/foo")
+          @loader.add(mainclass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.node("foo").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("new").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "bar"
+          children[1].value.should == "changed"
+        end
+      end
+    end
+
+    context "when expiring manifests with nodes and resources" do
+      before :each do
+        @loader.expire_file("/bar")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.node("bar").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("foo").should_not be_nil
+        @loader.hostclass("myclass").should_not be_nil
+        @loader.hostclass("otherclass").should_not be_nil
+        @loader.definition("something").should_not be_nil
+        @loader.definition("otherthing").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 1
+        children[0].should be_a Puppet::Parser::AST::Leaf
+        children[0].value.should == "foo"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          node = Puppet::Resource::Type.new(:node, "bar", :file => "/bar")
+          @loader.add(node)
+
+          code = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "bar")])
+          mainclass = Puppet::Resource::Type.new(:hostclass, "", :code => code, :file => "/bar")
+          @loader.add(mainclass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          node = Puppet::Resource::Type.new(:node, "new", :file => "/bar")
+          @loader.add(node)
+
+          code = Puppet::Parser::AST::BlockExpression.new(:children => [Puppet::Parser::AST::Leaf.new(:value => "changed")])
+          mainclass = Puppet::Resource::Type.new(:hostclass, "", :code => code, :file => "/bar")
+          @loader.add(mainclass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.node("bar").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("new").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "changed"
+        end
+      end
+    end
+
+    context "when expiring the first manifest with a hostclass" do
+      before :each do
+        @loader.expire_file("/myclass")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.hostclass("myclass").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("foo").should_not be_nil
+        @loader.node("bar").should_not be_nil
+        @loader.hostclass("otherclass").should_not be_nil
+        @loader.definition("something").should_not be_nil
+        @loader.definition("otherthing").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 2
+        [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+        children[0].value.should == "foo"
+        children[1].value.should == "bar"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          klass = Puppet::Resource::Type.new(:hostclass, "myclass", :file => "/myclass")
+          @loader.add(klass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          klass = Puppet::Resource::Type.new(:hostclass, "changed", :file => "/myclass")
+          @loader.add(klass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.hostclass("myclass").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("changed").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after replacing a hostclass with a definition" do
+        before :each do
+          define = Puppet::Resource::Type.new(:definition, "myclass", :file => "/myclass")
+          @loader.add(define)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.hostclass("myclass").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("myclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+    end
+
+    context "when expiring the second manifest with a hostclass" do
+      before :each do
+        @loader.expire_file("/otherclass")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.hostclass("otherclass").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("foo").should_not be_nil
+        @loader.node("bar").should_not be_nil
+        @loader.hostclass("myclass").should_not be_nil
+        @loader.definition("something").should_not be_nil
+        @loader.definition("otherthing").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 2
+        [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+        children[0].value.should == "foo"
+        children[1].value.should == "bar"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          klass = Puppet::Resource::Type.new(:hostclass, "otherclass", :file => "/otherclass")
+          @loader.add(klass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          klass = Puppet::Resource::Type.new(:hostclass, "changed", :file => "/otherclass")
+          @loader.add(klass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.hostclass("otherclass").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("changed").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after replacing a hostclass with a definition" do
+        before :each do
+          define = Puppet::Resource::Type.new(:definition, "otherclass", :file => "/otherclass")
+          @loader.add(define)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.hostclass("otherclass").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.definition("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+    end
+
+    context "when expiring the first manifest with a definition" do
+      before :each do
+        @loader.expire_file("/something")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.definition("something").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("foo").should_not be_nil
+        @loader.node("bar").should_not be_nil
+        @loader.hostclass("myclass").should_not be_nil
+        @loader.hostclass("otherclass").should_not be_nil
+        @loader.definition("otherthing").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 2
+        [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+        children[0].value.should == "foo"
+        children[1].value.should == "bar"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          klass = Puppet::Resource::Type.new(:definition, "something", :file => "/something")
+          @loader.add(klass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          klass = Puppet::Resource::Type.new(:definition, "changed", :file => "/something")
+          @loader.add(klass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.definition("something").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("changed").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after replacing a definition with a hostclass" do
+        before :each do
+          define = Puppet::Resource::Type.new(:hostclass, "something", :file => "/something")
+          @loader.add(define)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.definition("something").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.hostclass("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+    end
+
+    context "when expiring the second manifest with a definition" do
+      before :each do
+        @loader.expire_file("/otherthing")
+        @loader.refresh_code
+      end
+
+      it "should not contain code from the expired file" do
+        @loader.definition("otherthing").should be_nil
+      end
+
+      it "should contain code from all other files" do
+        @loader.node("foo").should_not be_nil
+        @loader.node("bar").should_not be_nil
+        @loader.hostclass("myclass").should_not be_nil
+        @loader.hostclass("otherclass").should_not be_nil
+        @loader.definition("something").should_not be_nil
+
+        mainclass = @loader.hostclass("")
+        mainclass.should_not be_nil
+        mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+        children = mainclass.code.children
+        children.length.should == 2
+        [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+        children[0].value.should == "foo"
+        children[1].value.should == "bar"
+      end
+
+      context "after re-importing the manifest" do
+        it "should contain all of the code" do
+          klass = Puppet::Resource::Type.new(:definition, "otherthing", :file => "/otherthing")
+          @loader.add(klass)
+
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("otherthing").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after re-importing a changed manifest" do
+        before :each do
+          klass = Puppet::Resource::Type.new(:definition, "changed", :file => "/otherthing")
+          @loader.add(klass)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.definition("otherthing").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.definition("something").should_not be_nil
+          @loader.definition("changed").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+
+      context "after replacing a definition with a hostclass" do
+        before :each do
+          define = Puppet::Resource::Type.new(:hostclass, "otherthing", :file => "/otherthing")
+          @loader.add(define)
+        end
+
+        it "should not contain code from the old file" do
+          @loader.definition("otherthing").should be_nil
+        end
+
+        it "should contain all the current code" do
+          @loader.node("foo").should_not be_nil
+          @loader.node("bar").should_not be_nil
+          @loader.hostclass("myclass").should_not be_nil
+          @loader.hostclass("otherclass").should_not be_nil
+          @loader.hostclass("otherthing").should_not be_nil
+          @loader.definition("something").should_not be_nil
+
+          mainclass = @loader.hostclass("")
+          mainclass.should_not be_nil
+          mainclass.code.should be_a Puppet::Parser::AST::BlockExpression
+
+          children = mainclass.code.children
+          children.length.should == 2
+          [children[0], children[1]].each{|c| c.should be_a Puppet::Parser::AST::Leaf}
+          children[0].value.should == "foo"
+          children[1].value.should == "bar"
+        end
+      end
+    end
+  end
 end

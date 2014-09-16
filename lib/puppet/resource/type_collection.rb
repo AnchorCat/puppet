@@ -14,6 +14,7 @@ class Puppet::Resource::TypeCollection
     @nodes.clear
     @watched_files.clear
     @notfound.clear
+    @filemap.clear
   end
 
   def initialize(env)
@@ -22,6 +23,7 @@ class Puppet::Resource::TypeCollection
     @definitions = {}
     @nodes = {}
     @notfound = {}
+    @filemap = Hash.new{|h,k| h[k] = []}
 
     # So we can keep a list and match the first-defined regex
     @node_list = []
@@ -39,18 +41,41 @@ class Puppet::Resource::TypeCollection
     "TypeCollection" + { :hostclasses => @hostclasses.keys, :definitions => @definitions.keys, :nodes => @nodes.keys }.inspect
   end
 
+  def expire_file(file)
+    if mainclass = @hostclasses[""]
+      mainclass.expire_file(file)
+    end
+    @filemap[file].each do |e|
+      send("delete_#{e[:type]}", e[:name])
+    end
+    @filemap[file] = []
+    unwatch_file(file)
+  end
+
+  # Should be called after one or more invocations of expire_file.
+  def refresh_code
+    if mainclass = @hostclasses[""]
+      mainclass.refresh_code
+    end
+    clear_version
+  end
+
   def <<(thing)
     add(thing)
     self
   end
 
   def add(instance)
+    clear_version
     if instance.type == :hostclass and other = @hostclasses[instance.name] and other.type == :hostclass
       other.merge(instance)
       return other
     end
     method = "add_#{instance.type}"
     send(method, instance)
+    if instance.file and !(instance.type == :hostclass and instance.name == "")
+      @filemap[instance.file] << {:type => instance.type, :name => instance.name}
+    end
     instance.resource_type_collection = self
     instance
   end
@@ -63,6 +88,10 @@ class Puppet::Resource::TypeCollection
     instance
   end
 
+  def delete_hostclass(name)
+    @hostclasses.delete(name)
+  end
+
   def hostclass(name)
     @hostclasses[munge_name(name)]
   end
@@ -73,6 +102,11 @@ class Puppet::Resource::TypeCollection
     @node_list << instance
     @nodes[instance.name] = instance
     instance
+  end
+
+  def delete_node(name)
+    @nodes.delete(name)
+    @node_list.delete_if{|node| node.name == name}
   end
 
   def loader
@@ -105,6 +139,10 @@ class Puppet::Resource::TypeCollection
     dupe_check(instance, @hostclasses) { |dupe| "'#{instance.name}' is already defined#{dupe.error_context} as a class; cannot redefine as a definition" }
     dupe_check(instance, @definitions) { |dupe| "Definition '#{instance.name}' is already defined#{dupe.error_context}; cannot be redefined" }
     @definitions[instance.name] = instance
+  end
+
+  def delete_definition(name)
+    @definitions.delete(name)
   end
 
   def definition(name)
@@ -151,8 +189,16 @@ class Puppet::Resource::TypeCollection
     raise Puppet::ParseError, "Execution of config_version command `#{environment.config_version}` failed: #{e.message}", e.backtrace
   end
 
+  def clear_version
+    remove_instance_variable(:@version) if defined?(@version)
+  end
+
   def watch_file(filename)
     @watched_files.watch(filename)
+  end
+
+  def unwatch_file(filename)
+    @watched_files.unwatch(filename)
   end
 
   def watching_file?(filename)
