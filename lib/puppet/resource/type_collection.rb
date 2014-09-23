@@ -32,8 +32,10 @@ class Puppet::Resource::TypeCollection
   end
 
   def import_ast(ast, modname)
-    ast.instantiate(modname).each do |instance|
-      add(instance)
+    [ast].flatten.map do |code|
+      code.instantiate(modname).each do |instance|
+        add(instance)
+      end
     end
   end
 
