@@ -176,7 +176,10 @@ class Puppet::Parser::Parser
       end
     end
     # Store the results as the top-level class.
-    return Puppet::Parser::AST::Hostclass.new('', :code => main)
+    return Puppet::Parser::AST::Hostclass.new('',
+      :code => main,
+      :file => @lexer.file,
+      :line => @lexer.line)
   ensure
     @lexer.clear
   end
